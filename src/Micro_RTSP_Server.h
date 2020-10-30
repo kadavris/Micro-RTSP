@@ -34,11 +34,10 @@
 class Micro_RTSP_Client
 {
 private:
-    OV2640Streamer *_streamer;
+protected:
+    CStreamer *_streamer;
     CRtspSession *_session;
     WiFiClient *_wifi_client;
-
-protected:
     int _id;
     int _errors; //consecutive errors on stream.
     bool _active; // still good or ready to be destroyed.
@@ -47,7 +46,7 @@ protected:
     void stop(); // prepare to die
 
 public:
-    Micro_RTSP_Client( WiFiClient *, OV2640 *, int );
+    Micro_RTSP_Client( WiFiClient *, CStreamer *, int );
     Micro_RTSP_Client( Micro_RTSP_Client && );
     ~Micro_RTSP_Client();
 
@@ -64,9 +63,11 @@ class Micro_RTSP_Server
   private:
     OV2640 *_cam;
     WiFiServer *_wifi_server;
+    CStreamer *_streamer;
+
     // using lists here ensures no pointer loss on most operations
     std::list<Micro_RTSP_Client> rtsp_clients;
-    std::list<WiFiClient> wifi_clients;
+    std::list<WiFiClient *> wifi_clients;
     int _max_clients;
     int _port;
 

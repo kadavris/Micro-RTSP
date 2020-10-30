@@ -18,27 +18,26 @@
   Foundation, Inc., 51 Franklin St, Fifth Floor, Boston, MA  02110-1301  USA
 */
 #include "Micro_RTSP_Server.h"
+#include "WiFi.h"
 
-Micro_RTSP_Client::Micro_RTSP_Client( WiFiClient *wclient, OV2640 *cam, int id )
+Micro_RTSP_Client::Micro_RTSP_Client( WiFiClient *wificlient, CStreamer *streamer, int id )
 {
-    _wifi_client = wclient;
-    _streamer = new OV2640Streamer( _wifi_client, *cam );    // our streamer for UDP/TCP based RTP transport
-    _session = new CRtspSession( _wifi_client, _streamer ); // our threads RTSP session and state
+    _streamer = streamer;
+    _wifi_client = wificlient;
+    _session = streamer->addSession( wificlient ); // our threads RTSP session and state
     _id = id;
     _errors = 0;
     _active = true;
 
     #ifdef DEBUG_MICRO_RTSP_SERVER
     Serial.print( "+ RTSP: New session " ); Serial.print( _id );
-    Serial.print( " from " ); Serial.println( _wifi_client->remoteIP().toString().c_str() );
+    Serial.print( " from " ); Serial.println( wificlient->remoteIP().toString().c_str() );
     #endif
 }
 
 //===================================
 Micro_RTSP_Client::Micro_RTSP_Client( Micro_RTSP_Client && old )
 {
-    stop();
-    _wifi_client = old._wifi_client; // wifi client will be queried for removal by server classs, so we left it in old too
     _streamer = old._streamer; 
     _session = old._session;
     _id = old._id;
@@ -69,9 +68,9 @@ void Micro_RTSP_Client::stop()
 
     if ( _session )
         delete _session;
-    if ( _streamer )
-        delete _streamer;
 
+    _session = NULL;
+    _streamer = NULL;
     _active = false;
 }
 
@@ -81,14 +80,14 @@ uint8_t Micro_RTSP_Client::active()
     if ( ! _active )
         return 0;
 
-    if ( _session->m_stopped || ! _wifi_client->connected() )
+    if ( _session->m_stopped )
     {
         stop();
 
         return 0;
     }
     
-    return _wifi_client->connected();
+    return true;
 }
 
 //===================================
@@ -140,9 +139,9 @@ bool Micro_RTSP_Client::streamFrame()
 
     try
     {
-        if( _session->m_streaming ) // PLAY command received
+        if( _streamer->anySessions() )
         {
-            _session->broadcastCurrentFrame( millis() );
+            _streamer->streamImage( millis() );
 
             #ifdef DEBUG_MICRO_RTSP_SERVER
             Serial.print( _id );
@@ -181,6 +180,12 @@ bool Micro_RTSP_Client::streamFrame()
 Micro_RTSP_Server::Micro_RTSP_Server( OV2640 *cam, uint16_t port, uint8_t max_rtsp_clients )
 {
     _wifi_server = new WiFiServer( port );
+    _streamer = new OV2640Streamer( cam );
+    String uri = WiFi.localIP().toString();
+    uri += ':';
+    uri += port;
+    _streamer->setURI( uri );
+    _streamer->debug = true;
     _cam = cam;
     _port = port;
     _max_clients = max_rtsp_clients;
@@ -196,59 +201,60 @@ Micro_RTSP_Server::~Micro_RTSP_Server()
 //===================================
 bool Micro_RTSP_Server::run()
 {
-    uint32_t msecPerFrame = 100;
+    uint32_t msecPerFrame = 100u;
     static uint32_t lastimage = millis();
     static uint32_t last_cmd = millis();
 
     // If we have an active client connection, just service that until gone
     uint32_t now = millis();
 
-    // looks like if the library reads stream too fast it receives fragments of commands
-    // and discards them mindlessly. trying to call processor every 1 sec to ensure most of cmd data came in full
-    if( now > last_cmd + 1000 || now < lastimage )
+    // trying to call processor not so often to ensure most of cmd data came in full
+    if( now > last_cmd + 1000 || now < last_cmd )
     { 
-        for( auto it = rtsp_clients.begin(); it != rtsp_clients.end(); ++it )
-        {
-            (*it).processCommands();
-        }
+        // for( auto it = rtsp_clients.begin(); it != rtsp_clients.end(); ++it )
+        // {
+        //     (*it).processCommands();
+        // }
+        _streamer->handleRequests( 0 );
 
-        last_cmd = now;
+        last_cmd = millis();
     }
 
+    now = millis();
     // check if it is a time to server another frame
+    // should be moved to camera class to intelligently update the framebuffer
     if( now > lastimage + msecPerFrame || now < lastimage ) // handle clock rollover
     { 
-        for( auto it = rtsp_clients.begin(); it != rtsp_clients.end(); ++it )
-        {
-            (*it).streamFrame();
-        }
+        // for( auto it = rtsp_clients.begin(); it != rtsp_clients.end(); ++it )
+        // {
+        //     (*it).streamFrame();
+        // }
 
+        _streamer->streamImage( now );
         lastimage = now;
 
         // check if we are overrunning our max frame rate
         now = millis();
 
         #ifdef DEBUG_MICRO_RTSP_SERVER
-        if( now > lastimage + msecPerFrame )
-        {
-            Serial.print( "+ RTSP: warning exceeding max frame rate of " );
-            Serial.print( now - lastimage );
-            Serial.println( " ms" );
-        }
+        // if( now > lastimage + msecPerFrame )
+        // {
+        //     Serial.print( "+ RTSP: warning exceeding max frame rate of " );
+        //     Serial.print( now - lastimage );
+        //     Serial.println( " ms" );
+        // }
         #endif
 
         // looking for inactive ones
-        for( auto it = rtsp_clients.begin(); it != rtsp_clients.end(); ++it )
+        for( auto it = wifi_clients.begin(); it != wifi_clients.end(); ++it )
         {
-            if ( ! (*it).active() )
+            if ( ! (*it)->connected() )
             {
                 #ifdef DEBUG_MICRO_RTSP_SERVER
-                Serial.print( "--- RTSP: Erasing inactive client ID " ); Serial.println( (*it)._id );
+                Serial.print( "--- RTSP: Erasing inactive client ID " ); Serial.println( (*it)->fd() );
                 #endif
 
-                wifi_clients.remove( *( (*it)._wifi_client ) );
-
-                rtsp_clients.erase( it );
+                wifi_clients.erase( it );
                 break; // if there are other disconnects they will be handled on next iteration
             }
         }
@@ -256,12 +262,18 @@ bool Micro_RTSP_Server::run()
         // and adding new
         if ( _wifi_server->hasClient() )
         {
-            wifi_clients.push_back( _wifi_server->available() );
+            wifi_clients.push_front( new WiFiClient( _wifi_server->available() ) );
 
-            if ( wifi_clients.back().fd() != -1 && rtsp_clients.size() < _max_clients )
-                rtsp_clients.push_back( Micro_RTSP_Client( &(wifi_clients.back()), _cam, rtsp_clients.size() ) );
+            if ( wifi_clients.front()->fd() == -1 || wifi_clients.size() > _max_clients )
+            {
+                wifi_clients.front()->stop();
+                wifi_clients.pop_front();
+            }
             else
-                wifi_clients.pop_back();
+            {
+                _streamer->addSession( wifi_clients.front() );
+                // rtsp_clients.push_back( Micro_RTSP_Client( &(wifi_clients.front()), _streamer, rtsp_clients.size() ) );
+            }
         }
     }
 
