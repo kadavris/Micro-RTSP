@@ -4,19 +4,13 @@
 #include <cstring>
 #include <ctime>
 
-//===========================================================
-//===========================================================
-//===========================================================
-CRtspSession::CRtspSession(SOCKET aClient, CStreamer * aStreamer) : LinkedListElement(aStreamer->getClientsListHead()),
-    m_Client(aClient),
-    m_Streamer(aStreamer)
+CRtspSession::CRtspSession(SOCKET aRtspClient, CStreamer * aStreamer) : m_RtspClient(aRtspClient),m_Streamer(aStreamer)
 {
-    printf("Creating RTSP session\n");
+    DEBUG_PRINT("Creating RTSP session\n");
     newCommandInit();
 
-    m_RtspClient = m_Client;
     m_RtspSessionID  = getRandom();         // create a session ID
-    m_RtspSessionID |= 0x80000000;
+    //m_RtspSessionID |= 0x80000000; //TODO why? just forces the session to be negative, which isn't spec
     m_StreamID       = -1;
     m_ClientRTPPort  =  0;
     m_ClientRTCPPort =  0;
@@ -24,18 +18,29 @@ CRtspSession::CRtspSession(SOCKET aClient, CStreamer * aStreamer) : LinkedListEl
     m_streaming = false;
     m_stopped = false;
 
-    m_RtpClientPort  = 0;
-    m_RtcpClientPort = 0;
-
     m_CSeq = 0; // CSeq sequense must be kept through the whole session
     m_RtspCmdType = RTSP_UNKNOWN;
-    debug = false;
+
+    RecvBuf = new char[RTSP_BUFFER_SIZE];
+    Response = new char[RESPONSE_BUFFER_SIZE];
+    SDPBuf = new char[OBUF_SIZE];
+    OBuf = new char[OBUF_SIZE];
+    Transport = new char[TRANSPORT_BUFFER_SIZE];
+    timeBuf = new char[RTSP_PARAM_STRING_MAX];
+    CmdName = new char[20];
 }
 
 CRtspSession::~CRtspSession()
 {
-    m_Streamer->ReleaseUdpTransport();
-    closesocket(m_RtspClient);
+    tcpsocketclose(m_RtspClient);
+
+    delete[] RecvBuf;
+    delete[] Response;
+    delete[] SDPBuf;
+    delete[] OBuf;
+    delete[] Transport;
+    delete[] timeBuf;
+    delete[] CmdName;
 }
 
 /*! @brief Initialize stuff for processing new client's command */
@@ -89,8 +94,6 @@ static char * parse_numeric_header( char *buf, unsigned int *number, int max_len
 /*! @brief Called internally to fully parse new command from the client */
 bool CRtspSession::ParseRtspRequest( char * aRequest, unsigned aRequestSize )
 {
-    static char CmdName[20]; // used for reporting only. longest cmd is like GET_PARAMETER == 13 char
-
     newCommandInit();
 
     /* now our typical command will be like:
@@ -135,7 +138,7 @@ bool CRtspSession::ParseRtspRequest( char * aRequest, unsigned aRequestSize )
         return false;
 
     m_CommandHostPort[ dst_pos ] = '\0';
-    if ( debug ) printf( "host-port: %s\n", m_CommandHostPort );
+    DEBUG_PRINT( "host-port: %s\n", m_CommandHostPort );
 
     while ( *cur_pos == '/' )
         ++cur_pos;
@@ -153,7 +156,7 @@ bool CRtspSession::ParseRtspRequest( char * aRequest, unsigned aRequestSize )
         return false;
 
     m_CommandPresentationPart[ dst_pos ] = '\0';
-    if ( debug ) printf( "+ pres: %s\n", m_CommandPresentationPart );
+    DEBUG_PRINT( "+ pres: %s\n", m_CommandPresentationPart );
 
     while ( *cur_pos == '/' )
         ++cur_pos;
@@ -175,7 +178,7 @@ bool CRtspSession::ParseRtspRequest( char * aRequest, unsigned aRequestSize )
     if ( *cur_pos != ' ' && *cur_pos != '\t' ) // no final RTSP/x.x
         return false;
 
-    if ( debug ) printf( "+ stream: %s\n", m_CommandStreamPart );
+    DEBUG_PRINT( "+ stream: %s\n", m_CommandStreamPart );
 
     while ( isspace( *cur_pos ) )
         ++cur_pos;
@@ -192,7 +195,7 @@ bool CRtspSession::ParseRtspRequest( char * aRequest, unsigned aRequestSize )
     // now looping through header lines and picking up what matter to us
     int left; // rough estimate of buffer space left to examine.
     // note that initial reader already put \0 mark in the buffer somewhere, so we only need to carefully check for it
-    if ( debug ) printf( "### analyzing headers\n" );
+    DEBUG_PRINT( "### analyzing headers\n" );
     
     for(;;)
     {
@@ -212,8 +215,7 @@ bool CRtspSession::ParseRtspRequest( char * aRequest, unsigned aRequestSize )
         left = aRequestSize - ( cur_pos - aRequest );
 
         // we're at the begin of the next header line now
-        if ( debug ) // a little window to our current line beginning
-        {
+        #ifdef ENABLE_DEBUG // a little window to our current line beginning
             printf( "* left: %d: '", left );
             for( char *s = cur_pos; *s && (s - cur_pos) < 20; ++s)
                 if( *s == '\r' )
@@ -225,7 +227,7 @@ bool CRtspSession::ParseRtspRequest( char * aRequest, unsigned aRequestSize )
                 else
                     printf( "<0x%x>", *s );
             puts( "'" );
-        }
+        #endif
 
         // now we're at the start of another header's line
 
@@ -241,7 +243,7 @@ bool CRtspSession::ParseRtspRequest( char * aRequest, unsigned aRequestSize )
 
             m_CSeq = new_cseq; // we may check something here or later maybe...
 
-            if ( debug ) printf( "+ got cseq: %u\n", new_cseq );
+            DEBUG_PRINT( "+ got cseq: %u\n", new_cseq );
 
             continue; // loop to next line
         }
@@ -254,7 +256,7 @@ bool CRtspSession::ParseRtspRequest( char * aRequest, unsigned aRequestSize )
             if( cur_pos == NULL )
                 return false;
 
-            if ( debug ) printf( "+ got cont-len: %u\n", m_ContentLength );
+            DEBUG_PRINT( "+ got cont-len: %u\n", m_ContentLength );
 
             continue; // loop to next line
         }
@@ -295,7 +297,7 @@ bool CRtspSession::ParseRtspRequest( char * aRequest, unsigned aRequestSize )
             else
                 m_TcpTransport = false;
 
-            if ( debug ) printf( "+ Transport is %s\n", (m_TcpTransport ? "TCP" : "UDP") );
+            DEBUG_PRINT( "+ Transport is %s\n", (m_TcpTransport ? "TCP" : "UDP") );
 
             m_ClientRTPPort = 0;
 
@@ -331,7 +333,7 @@ bool CRtspSession::ParseRtspRequest( char * aRequest, unsigned aRequestSize )
 
                     m_ClientRTPPort  = atoi( cur_pos );
                     m_ClientRTCPPort = m_ClientRTPPort + 1;
-                    if ( debug ) printf( "+ got client port: %u\n", m_ClientRTPPort );
+                    DEBUG_PRINT( "+ got client port: %u\n", m_ClientRTPPort );
                 }
 
                 *next_part = last_char; // restoring if changed
@@ -340,14 +342,17 @@ bool CRtspSession::ParseRtspRequest( char * aRequest, unsigned aRequestSize )
             }
         } // Transport:
 
-        if ( debug && *cur_pos != '\r' ) printf( "? unknown header ?\n" );
+        if ( *cur_pos != '\r' )
+        {
+            ERROR_PRINT( "? unknown header ?\n" );
+        }
 
         // ignored headers are skipped. we left current position at the CRLF so next loop is going smoothly
         while ( *cur_pos && *cur_pos != '\r' )
             ++cur_pos;
     } // loop though headers
 
-    printf( "\n+ RTSP command: %s\n", CmdName );
+    DEBUG_PRINT( "\n+ RTSP command: %s\n", CmdName );
 
     return true;
 }
@@ -371,21 +376,15 @@ RTSP_CMD_TYPES CRtspSession::Handle_RtspRequest( char *aRequest, unsigned aReque
 
 void CRtspSession::Handle_RtspOPTION()
 {
-    static char Response[1024]; // Note: we assume single threaded, this large buf we keep off of the tiny stack
-
-    snprintf(Response,sizeof(Response),
+    snprintf(Response, RESPONSE_BUFFER_SIZE,
              "RTSP/1.0 200 OK\r\nCSeq: %u\r\n"
              "Public: DESCRIBE, SETUP, TEARDOWN, PLAY, PAUSE\r\n\r\n", m_CSeq);
 
-    socketsend(m_RtspClient,Response,strlen(Response));
+    tcpsocketsend(m_RtspClient,Response,strlen(Response));
 }
 
-void CRtspSession::Handle_RtspDESCRIBE() // FIXME: too much redundancy. should eliminate intermediate buffers.
+void CRtspSession::Handle_RtspDESCRIBE()
 {
-    static char Response[1024]; // Note: we assume single threaded, this large buf we keep off of the tiny stack
-    static char SDPBuf[1024];
-    static char URLBuf[1024];
-
     // check whether we know a stream with the URL which is requested
     m_StreamID = -1;        // invalid URL
 
@@ -395,82 +394,67 @@ void CRtspSession::Handle_RtspDESCRIBE() // FIXME: too much redundancy. should e
 
     if ( m_StreamID == -1 )
     {   // Stream not available
-        snprintf( Response, sizeof(Response),
+        snprintf( Response, RESPONSE_BUFFER_SIZE,
                  "RTSP/1.0 404 Stream Not Found\r\nCSeq: %u\r\n%s\r\n",
                  m_CSeq,
                  DateHeader());
 
-        socketsend( m_RtspClient, Response, strlen(Response) );
+        tcpsocketsend( m_RtspClient, Response, strlen(Response) );
         return;
     }
 
     // simulate DESCRIBE server response
-    static char OBuf[256];
-    char * ColonPtr;
-    strcpy( OBuf, m_CommandHostPort );
-    ColonPtr = strstr( OBuf, ":" );
-    if (ColonPtr != nullptr) ColonPtr[0] = 0x00;
+    //char * ColonPtr;
+    //strcpy( OBuf, m_CommandHostPort );
+    //ColonPtr = strstr( OBuf, ":" );
+    //if (ColonPtr != nullptr) ColonPtr[0] = 0x00; //TODO good?
 
-    snprintf( SDPBuf, sizeof(SDPBuf),
+    snprintf( SDPBuf, RESPONSE_BUFFER_SIZE,
              "v=0\r\n"
-             "o=- %d 1 IN IP4 %s\r\n"
+             "o=- %d %d IN IP4 %s\r\n"
              "s=\r\n"
              "t=0 0\r\n"                                       // start / stop - 0 -> unbounded and permanent session
-             "m=video 0 RTP/AVP 26\r\n"                        // currently we just handle UDP sessions (??????)
-             // "a=x-dimensions: 640,480\r\n"
+             "m=video 0 RTP/AVP 26\r\n"
              "c=IN IP4 0.0.0.0\r\n",
-             rand(),
-             OBuf );
+             (int)getRandom(),
+             (int)getRandom(),
+             m_CommandHostPort );
 
-    snprintf( URLBuf, sizeof(URLBuf),
-             "rtsp://%s/%s/%s", m_CommandHostPort, m_CommandPresentationPart, m_CommandStreamPart );
-
-    snprintf( Response, sizeof(Response),
+    snprintf( Response, RESPONSE_BUFFER_SIZE,
              "RTSP/1.0 200 OK\r\nCSeq: %u\r\n"
              "%s\r\n"
-             "Content-Base: %s/\r\n"
+             "Content-Base: rtsp://%s/%s/%s/\r\n"
              "Content-Type: application/sdp\r\n"
              "Content-Length: %d\r\n\r\n"
              "%s",
              m_CSeq,
              DateHeader(),
-             URLBuf,
+             m_CommandHostPort, m_CommandPresentationPart, m_CommandStreamPart,
              (int) strlen(SDPBuf),
              SDPBuf);
 
-    socketsend( m_RtspClient, Response, strlen(Response) );
+    tcpsocketsend( m_RtspClient, Response, strlen(Response) );
 }
-
-void CRtspSession::InitTransport(u_short aRtpPort, u_short aRtcpPort)
-{
-    m_RtpClientPort  = aRtpPort;
-    m_RtcpClientPort = aRtcpPort;
-
-    if (!m_TcpTransport)
-    {   // allocate port pairs for RTP/RTCP ports in UDP transport mode
-        m_Streamer->InitUdpTransport();
-    };
-};
 
 void CRtspSession::Handle_RtspSETUP()
 {
     static char Response[1024];
     static char Transport[255];
 
-    // init RTSP Session transport type (UDP or TCP) and ports for UDP transport
-    InitTransport(m_ClientRTPPort,m_ClientRTCPPort);
+    // init RTP streamer transport type (UDP or TCP) and ports for UDP transport
+    m_Streamer->InitTransport(m_ClientRTPPort,m_ClientRTCPPort,m_TcpTransport);
 
     // simulate SETUP server response
     if (m_TcpTransport)
-        snprintf(Transport,sizeof(Transport),"RTP/AVP/TCP;unicast;interleaved=0-1");
+        snprintf(Transport,TRANSPORT_BUFFER_SIZE,"RTP/AVP/TCP;unicast;interleaved=0-1");
     else
-        snprintf(Transport,sizeof(Transport),
-                 "RTP/AVP;unicast;destination=127.0.0.1;source=127.0.0.1;client_port=%i-%i;server_port=%i-%i",
+        snprintf(Transport,TRANSPORT_BUFFER_SIZE,
+                 "RTP/AVP;unicast;destination=127.0.0.1;source=127.0.0.1;client_port=%i-%i;server_port=%i-%i", //TODO set IP addresses
                  m_ClientRTPPort,
                  m_ClientRTCPPort,
                  m_Streamer->GetRtpServerPort(),
                  m_Streamer->GetRtcpServerPort());
-    snprintf(Response,sizeof(Response),
+    snprintf(Response,RESPONSE_BUFFER_SIZE,
              "RTSP/1.0 200 OK\r\nCSeq: %u\r\n"
              "%s\r\n"
              "Transport: %s\r\n"
@@ -480,33 +464,31 @@ void CRtspSession::Handle_RtspSETUP()
              Transport,
              m_RtspSessionID);
 
-    socketsend(m_RtspClient,Response,strlen(Response));
+    tcpsocketsend(m_RtspClient,Response,strlen(Response));
 }
 
 void CRtspSession::Handle_RtspPLAY()
 {
-    static char Response[1024];
-
     // simulate SETUP server response
-    snprintf( Response, sizeof(Response),
+    snprintf(Response, RESPONSE_BUFFER_SIZE,
              "RTSP/1.0 200 OK\r\nCSeq: %u\r\n"
              "%s\r\n"
              "Range: npt=0.000-\r\n"
              "Session: %i\r\n"
-             "RTP-Info: url=rtsp://127.0.0.1:8554/mjpeg/1/track1\r\n\r\n", // FIXME
+             "RTP-Info: url=rtsp://%s/%s/%s/\r\n\r\n", // FIXME
              m_CSeq,
              DateHeader(),
-             m_RtspSessionID);
+             m_RtspSessionID,
+             m_CommandHostPort, m_CommandPresentationPart, m_CommandStreamPart);
 
-    socketsend(m_RtspClient,Response,strlen(Response));
+    tcpsocketsend(m_RtspClient,Response,strlen(Response));
 }
 
 char const * CRtspSession::DateHeader()
 {
-    static char buf[200];
     time_t tt = time(NULL);
-    strftime(buf, sizeof buf, "Date: %a, %b %d %Y %H:%M:%S GMT", gmtime(&tt));
-    return buf;
+    strftime(timeBuf, RTSP_PARAM_STRING_MAX, "Date: %a, %b %d %Y %H:%M:%S GMT", gmtime(&tt));
+    return timeBuf;
 }
 
 int CRtspSession::GetStreamID()
@@ -522,25 +504,24 @@ bool CRtspSession::handleRequests( uint32_t readTimeoutMs )
     if ( m_stopped )
         return false; // Already closed down
 
-    static unsigned bufPos = 0; // current position into receiving buffer. used to glue split requests.
-    static enum { hdrStateUnknown, hdrStateGotMethod, hdrStateInvalid } state = hdrStateUnknown;
-    static char RecvBuf[RTSP_BUFFER_SIZE];   // Note: we assume single threaded, this large buf we keep off of the tiny stack
+    bufPos = 0; // current position into receiving buffer. used to glue split requests.
+    state = hdrStateUnknown;
 
-    if ( bufPos == 0 || bufPos >= sizeof( RecvBuf ) - 1 ) // in case of bad client
+    if ( bufPos == 0 || bufPos >= RTSP_BUFFER_SIZE - 1 ) // in case of bad client
     {
-        memset( RecvBuf, 0x00, sizeof( RecvBuf ) );
+        memset( RecvBuf, 0x00, RTSP_BUFFER_SIZE );
         bufPos = 0;
         state = hdrStateUnknown;
     }
 
     // we always read 1 byte less than the buffer length, so all string ops here will not panic
-    int res = socketread( m_RtspClient, RecvBuf + bufPos, sizeof( RecvBuf ) - bufPos - 1, readTimeoutMs );
+    int res = tcpsocketread( m_RtspClient, RecvBuf + bufPos, RTSP_BUFFER_SIZE - bufPos - 1, readTimeoutMs );
     if ( res > 0 )
     {
         bufPos += res;
         RecvBuf[ bufPos ] = '\0';
 
-        if ( debug ) printf( "+ read %d bytes\n", res );
+        DEBUG_PRINT( "+ read %d bytes\n", res );
 
         if ( state == hdrStateUnknown && bufPos >= 6 ) // we need at least 4-letter at the line start with optional heading CRLF
         {
@@ -579,8 +560,8 @@ bool CRtspSession::handleRequests( uint32_t readTimeoutMs )
             if ( state == hdrStateInvalid ) // tossing some immediate answer, so client don't fall into endless stupor
             {
                 // not sure which code is more appropriate and if CSeq is needed here?
-                int l = snprintf( RecvBuf, sizeof(RecvBuf), "RTSP/1.0 400 Bad Request\r\nCSeq: %u\r\n\r\n", m_CSeq );
-                socketsend( m_RtspClient, RecvBuf, l );
+                int l = snprintf( RecvBuf, RTSP_BUFFER_SIZE, "RTSP/1.0 400 Bad Request\r\nCSeq: %u\r\n\r\n", m_CSeq );
+                tcpsocketsend( m_RtspClient, RecvBuf, l );
                 bufPos = 0;
                 return false;
             }
@@ -592,7 +573,9 @@ bool CRtspSession::handleRequests( uint32_t readTimeoutMs )
             m_streaming = true;
 
         else if ( C == RTSP_TEARDOWN )
+        {
             m_stopped = true;
+        }
 
         // cleaning up
         state = hdrStateUnknown;
@@ -602,7 +585,7 @@ bool CRtspSession::handleRequests( uint32_t readTimeoutMs )
     } // res > 0
     else if ( res == 0 )
     {
-        printf("client closed socket, exiting\n");
+        DEBUG_PRINT("client closed socket, exiting\n");
         m_stopped = true;
         return true;
     }
@@ -610,5 +593,13 @@ bool CRtspSession::handleRequests( uint32_t readTimeoutMs )
     {
         // Timeout on read
         return false;
+    }
+}
+
+void CRtspSession::broadcastCurrentFrame(uint32_t curMsec) {
+    // Send a frame
+    if (m_streaming && !m_stopped) {
+        DEBUG_PRINT("serving a frame\n");
+        m_Streamer->streamImage(curMsec);
     }
 }

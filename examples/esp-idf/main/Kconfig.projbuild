@@ -1,0 +1,32 @@
+menu "ESP32CAM Configuration"
+
+    config ESP_WIFI_SSID
+        string "WiFi SSID"
+        default "myssid"
+        help
+            SSID (network name) for the ESP32CAM to connect to.
+
+    config ESP_WIFI_PASSWORD
+        string "WiFi Password"
+        default "mypassword"
+        help
+            WiFi password (WPA or WPA2) for the ESP32CAM to use.
+
+    config CAM_VERTICAL_FLIP
+        bool "Vertical flip"
+        default y
+        help
+            Vertically flip the camera image.
+
+    config CAM_HORIZONTAL_MIRROR
+        bool "Horizontal mirror"
+        default y
+        help
+            Horizontally mirrors the camera image.
+
+    config CAM_FRAMERATE
+        int "Frames per second"
+        default 4
+        help
+            Frames per second the camera should run at.
+endmenu

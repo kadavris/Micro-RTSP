@@ -1,7 +1,7 @@
 
-SRCS = ../src/CRtspSession.cpp ../src/CStreamer.cpp ../src/JPEGSamples.cpp ../src/SimStreamer.cpp
+SRCS = ../src/CRtspSession.cpp ../src/CStreamer.cpp
 
-run: *.cpp ../src/*
+all: *.cpp
 	#skill testerver
-	g++ -Wall -o testserver -I ../src -I . *.cpp $(SRCS)
+	g++ -g -Wall -o testserver -I ../src -I . *.cpp $(SRCS)
 	#./testserver

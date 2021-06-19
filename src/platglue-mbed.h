@@ -35,7 +35,7 @@ inline UDPSOCKET udpsocketcreate(unsigned short portNum)
 
     if (s->open(NetworkInterface::get_default_instance()) != 0 && s->bind(portNum) != 0)
     {
-        printf("Can't bind port %d\n", portNum);
+        ERROR_PRINT("Can't bind port %d\n", portNum);
         delete s;
         return nullptr;
     }

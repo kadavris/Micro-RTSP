@@ -1,32 +1,22 @@
 #pragma once
 
 #include "platglue.h"
-#include "LinkedListElement.h"
+
+#define RTPBUF_SIZE 2048
 
 typedef unsigned const char *BufPtr;
-
-class CRtspSession;
 
 class CStreamer
 {
 public:
-    CStreamer( u_short width, u_short height );
+    CStreamer(SOCKET aClient, u_short width, u_short height);
     virtual ~CStreamer();
 
-    CRtspSession *addSession( SOCKET aClient );
-    LinkedListElement* getClientsListHead() { return &m_Clients; }
-
-    int anySessions() { return m_Clients.NotEmpty(); }
-
-    bool handleRequests(uint32_t readTimeoutMs);
-
+    void    InitTransport(u_short aRtpPort, u_short aRtcpPort, bool TCP);
     u_short GetRtpServerPort();
     u_short GetRtcpServerPort();
 
     virtual void    streamImage(uint32_t curMsec) = 0; // send a new image to the client
-    bool InitUdpTransport(void);
-    void ReleaseUdpTransport(void);
-    bool debug;
     void setURI( String hostport, String pres = "mjpeg", String stream = "1" ); // set URI parts for sessions to use.
     String getURIHost(){ return m_URIHost; }; // for getting things back by sessions
     String getURIPresentation(){ return m_URIPresentation; };
@@ -46,20 +36,22 @@ private:
     UDPSOCKET m_RtpSocket;           // RTP socket for streaming RTP packets to client
     UDPSOCKET m_RtcpSocket;          // RTCP socket for sending/receiving RTCP packages
 
+    uint16_t m_RtpClientPort;      // RTP receiver port on client (in host byte order!)
+    uint16_t m_RtcpClientPort;     // RTCP receiver port on client (in host byte order!)
     IPPORT m_RtpServerPort;      // RTP sender port on server
     IPPORT m_RtcpServerPort;     // RTCP sender port on server
 
     u_short m_SequenceNumber;
     uint32_t m_Timestamp;
     int m_SendIdx;
-
-    LinkedListElement m_Clients;
+    bool m_TCPTransport;
+    SOCKET m_Client;
     uint32_t m_prevMsec;
-
-    int m_udpRefCount;
 
     u_short m_width; // image data info
     u_short m_height;
+        
+    char * RtpBuf;
 };
 
 
